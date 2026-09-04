@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import altair as alt
+import plotly.graph_objects as go
 
 
 # ============================================================
@@ -1431,59 +1432,79 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
                 st.markdown(card, unsafe_allow_html=True)
         st.write("")
 
-    # Interactive donut chart using the same semantic HER colors.
-    color_domain = ["Choose Often", "Choose Sometimes", "Choose Rarely", "Assorted", "Unranked", "Not Ranked", "Non Food", "Needs Review"]
-    color_range = [HER_COLORS[x] for x in color_domain]
-    point = alt.selection_point(fields=["HER Classification"], on="click", clear="dblclick", name="her_class")
-    donut_chart = (
-        alt.Chart(comp)
-        .mark_arc(innerRadius=95, outerRadius=175)
-        .encode(
-            theta=alt.Theta("Pounds:Q", stack=True),
-            color=alt.Color(
-                "HER Classification:N",
-                scale=alt.Scale(domain=color_domain, range=color_range),
-                legend=alt.Legend(
-                    title="HER classification",
-                    orient="right",
-                    labelLimit=220,
-                    labelFontSize=13,
-                    titleFontSize=14,
+    # Large donut chart with full labels and percentages.
+    # Plotly automatically moves labels outside crowded slices and draws leader lines.
+    donut_df = comp.copy()
+    donut_df["HER Classification"] = donut_df["HER Classification"].astype(str)
+    donut_df = donut_df[donut_df["Pounds"].gt(0)].copy()
+
+    donut_colors = [
+        HER_COLORS.get(rank, HER_COLORS["Needs Review"])
+        for rank in donut_df["HER Classification"]
+    ]
+
+    donut_fig = go.Figure(
+        data=[
+            go.Pie(
+                labels=donut_df["HER Classification"],
+                values=donut_df["Pounds"],
+                hole=0.52,
+                sort=False,
+                direction="clockwise",
+                marker=dict(
+                    colors=donut_colors,
+                    line=dict(color="rgba(255,255,255,0.55)", width=2),
                 ),
-            ),
-            opacity=alt.condition(point, alt.value(1.0), alt.value(0.88)),
-            tooltip=[
-                alt.Tooltip("HER Classification:N", title="Classification"),
-                alt.Tooltip("Pounds:Q", title="Pounds", format=",.1f"),
-                alt.Tooltip("Percent:Q", title="% of load", format=".1f"),
-            ],
-        )
-        .add_params(point)
-        .properties(height=390)
+                texttemplate="%{label}<br><b>%{percent}</b>",
+                textposition="outside",
+                textfont=dict(size=17),
+                hovertemplate=(
+                    "<b>%{label}</b><br>"
+                    "%{value:,.1f} lb<br>"
+                    "%{percent}<extra></extra>"
+                ),
+                automargin=True,
+            )
+        ]
     )
 
-    try:
-        chart_event = st.altair_chart(
-            donut_chart,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="her_class",
-            key="her_color_composition_chart",
-        )
-    except TypeError:
-        chart_event = None
-        st.altair_chart(donut_chart, use_container_width=True)
+    donut_fig.update_layout(
+        height=620,
+        margin=dict(l=115, r=115, t=30, b=30),
+        showlegend=True,
+        legend=dict(
+            title="HER classification",
+            orientation="v",
+            yanchor="middle",
+            y=0.5,
+            xanchor="left",
+            x=1.03,
+            font=dict(size=15),
+            title_font=dict(size=16),
+        ),
+        uniformtext=dict(minsize=13, mode="hide"),
+    )
 
-    st.caption("Use the buttons below to open the foods and pounds behind each classification. On newer Streamlit versions, clicking a donut segment also opens the same drill-down.")
+    # Center annotation keeps total load visible without competing with slice labels.
+    donut_fig.add_annotation(
+        text=f"<b>{total_lb:,.0f} lb</b><br>Total load",
+        x=0.5,
+        y=0.5,
+        showarrow=False,
+        font=dict(size=22),
+        align="center",
+    )
+
+    st.plotly_chart(
+        donut_fig,
+        use_container_width=True,
+        config={"displayModeBar": False},
+        key="her_color_composition_donut",
+    )
+
+    st.caption("Labels show each HER classification and its share of the incoming load. Use the buttons below to inspect the foods and pounds in each group.")
 
     selected_rank = None
-    if chart_event is not None:
-        try:
-            selected_points = chart_event.selection.her_class
-            if selected_points:
-                selected_rank = selected_points[0].get("HER Classification")
-        except Exception:
-            selected_rank = None
 
     @st.dialog("Foods in selected HER classification", width="large")
     def show_her_items(rank: str) -> None:
