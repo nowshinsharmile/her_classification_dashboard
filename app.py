@@ -1431,22 +1431,27 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
                 st.markdown(card, unsafe_allow_html=True)
         st.write("")
 
-    # Interactive semantic-color chart. Clicking a bar returns the selected HER class.
+    # Interactive donut chart using the same semantic HER colors.
     color_domain = ["Choose Often", "Choose Sometimes", "Choose Rarely", "Assorted", "Unranked", "Not Ranked", "Non Food", "Needs Review"]
     color_range = [HER_COLORS[x] for x in color_domain]
     point = alt.selection_point(fields=["HER Classification"], on="click", clear="dblclick", name="her_class")
-    color_chart = (
+    donut_chart = (
         alt.Chart(comp)
-        .mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5)
+        .mark_arc(innerRadius=95, outerRadius=175)
         .encode(
-            x=alt.X("HER Classification:N", sort=color_domain, title=None, axis=alt.Axis(labelAngle=0)),
-            y=alt.Y("Pounds:Q", title="Pounds"),
+            theta=alt.Theta("Pounds:Q", stack=True),
             color=alt.Color(
                 "HER Classification:N",
                 scale=alt.Scale(domain=color_domain, range=color_range),
-                legend=None,
+                legend=alt.Legend(
+                    title="HER classification",
+                    orient="right",
+                    labelLimit=220,
+                    labelFontSize=13,
+                    titleFontSize=14,
+                ),
             ),
-            opacity=alt.condition(point, alt.value(1.0), alt.value(0.82)),
+            opacity=alt.condition(point, alt.value(1.0), alt.value(0.88)),
             tooltip=[
                 alt.Tooltip("HER Classification:N", title="Classification"),
                 alt.Tooltip("Pounds:Q", title="Pounds", format=",.1f"),
@@ -1454,15 +1459,12 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
             ],
         )
         .add_params(point)
-        .properties(height=360)
+        .properties(height=390)
     )
-    # Render the semantic-color chart in a Streamlit-version-safe way.
-    # Some Streamlit versions do not accept width="stretch" and/or do not
-    # support chart selection callbacks. The drill-down buttons below work on
-    # all supported versions.
+
     try:
         chart_event = st.altair_chart(
-            color_chart,
+            donut_chart,
             use_container_width=True,
             on_select="rerun",
             selection_mode="her_class",
@@ -1470,9 +1472,9 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
         )
     except TypeError:
         chart_event = None
-        st.altair_chart(color_chart, use_container_width=True)
+        st.altair_chart(donut_chart, use_container_width=True)
 
-    st.caption("Use the buttons below to open the foods and pounds behind each classification. On newer Streamlit versions, clicking a bar also opens the same drill-down.")
+    st.caption("Use the buttons below to open the foods and pounds behind each classification. On newer Streamlit versions, clicking a donut segment also opens the same drill-down.")
 
     selected_rank = None
     if chart_event is not None:
