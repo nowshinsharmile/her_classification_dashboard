@@ -155,6 +155,72 @@ Tuna,3 oz,84,130,15,1.5,2,0,0,50,17,40,2,480,14,0,0,26,2,2,2,4'''
 # ============================================================
 
 st.set_page_config(page_title="HER Food Classification", page_icon="🥗", layout="wide")
+
+st.markdown(r'''
+<style>
+/* Larger, uniform composition cards */
+div[data-testid="stMetric"]{
+    min-height: 165px;
+    padding: 1.15rem 1.25rem !important;
+    border-radius: 14px;
+}
+div[data-testid="stMetric"] label,
+div[data-testid="stMetric"] [data-testid="stMetricLabel"]{
+    font-size: 1.15rem !important;
+    line-height: 1.25 !important;
+    font-weight: 650 !important;
+}
+div[data-testid="stMetric"] [data-testid="stMetricValue"]{
+    font-size: 2.6rem !important;
+    line-height: 1.05 !important;
+    font-weight: 750 !important;
+}
+div[data-testid="stMetric"] [data-testid="stMetricDelta"]{
+    font-size:1.25rem !important;
+}
+
+/* HER composition cards */
+.her-comp-grid{
+    display:grid;
+    grid-template-columns:repeat(5,minmax(220px,1fr));
+    gap:1.15rem;
+    margin:1rem 0 1.3rem;
+}
+.her-comp-card{
+    min-height:215px;
+    border-radius:18px;
+    padding:1.5rem 1.6rem;
+    display:flex;
+    flex-direction:column;
+    justify-content:space-between;
+    box-sizing:border-box;
+}
+.her-comp-title{
+    font-size:1.35rem;
+    font-weight:750;
+    line-height:1.18;
+    white-space:normal;
+}
+.her-comp-value{
+    font-size:2.7rem;
+    font-weight:800;
+    line-height:1.05;
+    margin-top:.65rem;
+}
+.her-comp-pct{
+    font-size:1.25rem;
+    font-weight:650;
+    line-height:1.15;
+    margin-top:.45rem;
+}
+@media (max-width:1400px){
+    .her-comp-grid{grid-template-columns:repeat(3,minmax(240px,1fr));}
+}
+@media (max-width:900px){
+    .her-comp-grid{grid-template-columns:1fr;}
+}
+</style>
+''', unsafe_allow_html=True)
 st.markdown("""<style>
 .block-container{max-width:1180px;padding-top:1.4rem;padding-bottom:3rem}
 [data-testid="stSidebar"]{min-width:285px}
@@ -726,6 +792,16 @@ MANUAL_LOAD_CLASSIFICATIONS = {
         "overall": "Choose Rarely",
         "basis": "Bacon is explicitly classified as Choose Rarely under the HER protein guideline.",
     },
+    "protein powder": {
+        "category": "Miscellaneous Products",
+        "overall": "Unranked",
+        "basis": "Protein powders are Unranked and grouped under Miscellaneous Products.",
+    },
+    "whey protein powder": {
+        "category": "Miscellaneous Products",
+        "overall": "Unranked",
+        "basis": "Protein powders are Unranked and grouped under Miscellaneous Products.",
+    },
 }
 
 def manual_load_classification(query: str) -> dict[str, str] | None:
@@ -969,7 +1045,23 @@ def analyze_load(food_df: pd.DataFrame, incoming: pd.DataFrame, fbcenc_crosswalk
         if not food or pd.isna(pounds) or pounds <= 0:
             continue
 
-        # Prefer the food bank's reviewed catalog classification when available.
+        # Protein powders are explicitly Unranked and belong in Miscellaneous Products.
+        # Apply this before any catalog/database match so broad product wording cannot
+        # accidentally place them in Protein.
+        if contains_any_phrase(food, PROTEIN_POWDER_TERMS):
+            records.append({
+                "Item No": item_no,
+                "Input Food": food,
+                "Pounds": float(pounds),
+                "Matched Food": clean_text(food),
+                "HER Category": "Miscellaneous Products",
+                "HER Classification": "Unranked",
+                "Match Status": "HER rule",
+                "Match Note": "Protein powders are Unranked and grouped under Miscellaneous Products.",
+            })
+            continue
+
+        # Prefer available reviewed classification data when available.
         local_match, local_method = match_fbcenc_crosswalk(fbcenc_crosswalk, item_no, food)
         if local_match is not None:
             records.append({
@@ -1093,7 +1185,7 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
         toy = pd.DataFrame({
             "Item No": [
                 "CV1043", "PTP024", "CD2013", "EN1618", "BV1009", "CD1812",
-                "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "",
             ],
             "Food": [
                 "1% LF MILK",
@@ -1109,11 +1201,12 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
                 "leche fresca",
                 "Salmon",
                 "Canned tuna",
+                "Protein powder",
                 "Mystery donation box",
             ],
             "Pounds": [
                 520.0, 180.0, 260.0, 340.0, 410.0, 150.0,
-                220.0, 360.0, 175.0, 650.0, 300.0, 240.0, 195.0, 90.0,
+                220.0, 360.0, 175.0, 650.0, 300.0, 240.0, 195.0, 125.0, 90.0,
             ],
         })
         incoming_editor = st.data_editor(
@@ -1168,7 +1261,12 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
         return
 
     total_lb = float(analysis["Pounds"].sum())
-    reviewed_lb = float(analysis.loc[analysis["Match Status"].eq("Data available"), "Pounds"].sum())
+    needs_review_lb = float(
+        analysis.loc[analysis["HER Classification"].eq("Needs Review"), "Pounds"].sum()
+    )
+    classified_lb = total_lb - needs_review_lb
+    classified_pct = (classified_lb / total_lb * 100.0) if total_lb > 0 else 0.0
+    review_pct = (needs_review_lb / total_lb * 100.0) if total_lb > 0 else 0.0
     comp = analysis.groupby("HER Classification", dropna=False)["Pounds"].sum().reset_index()
     comp["Percent"] = np.where(total_lb > 0, comp["Pounds"] / total_lb * 100, 0.0)
     order = {"Choose Often": 0, "Choose Sometimes": 1, "Choose Rarely": 2, "Assorted": 3, "Unranked": 4, "Not Ranked": 5, "Non Food": 6, "Needs Review": 7}
@@ -1176,9 +1274,10 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
     comp = comp.sort_values("_order").drop(columns="_order")
 
     st.markdown("### Color composition")
-    m1, m2 = st.columns(2)
+    m1, m2, m3 = st.columns(3)
     m1.metric("Total incoming load", f"{total_lb:,.1f} lb")
-    m2.metric("Data available", f"{reviewed_lb:,.1f} lb", help="Pounds classified directly from available reviewed classification data")
+    m2.metric("Classified", f"{classified_lb:,.1f} lb", help=f"{classified_pct:.1f}% of the incoming load has a HER result.")
+    m3.metric("Needs review", f"{needs_review_lb:,.1f} lb", help=f"{review_pct:.1f}% of the incoming load could not be classified confidently.")
 
     # Semantic cards. Avoid st.metric delta because Streamlit renders every positive
     # percentage in green, which is misleading for yellow/red/review classes.
@@ -1195,7 +1294,7 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
                             box-shadow:0 1px 2px rgba(0,0,0,.12);margin-bottom:8px">
                     <div style="font-size:1rem;font-weight:650;margin-bottom:12px">{icon} {rank}</div>
                     <div style="font-size:2rem;font-weight:750;line-height:1.05">{r['Pounds']:,.1f} lb</div>
-                    <div style="font-size:1.05rem;font-weight:650;margin-top:12px">{r['Percent']:.1f}% of load</div>
+                    <div style="font-size:1.25rem;font-weight:650;margin-top:12px">{r['Percent']:.1f}% of load</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1309,10 +1408,51 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
     category["Percent"] = np.where(total_lb > 0, category["Pounds"] / total_lb * 100, 0.0)
 
     if not category.empty:
-        st.bar_chart(category.set_index("Food Composition Category")[["Percent"]], horizontal=True)
-        display_category = category.rename(columns={"Food Composition Category": "Food Category", "Percent": "% of Total Load"})
+        # Explicit Altair chart so categories are ordered by weight and long names
+        # are shown in full instead of being truncated with ellipses.
+        category_chart = (
+            alt.Chart(category)
+            .mark_bar(cornerRadiusEnd=4)
+            .encode(
+                y=alt.Y(
+                    "Food Composition Category:N",
+                    sort=alt.EncodingSortField(field="Pounds", order="descending"),
+                    title=None,
+                    axis=alt.Axis(
+                        labelLimit=500,
+                        labelFontSize=13,
+                        labelPadding=8,
+                        ticks=False,
+                    ),
+                ),
+                x=alt.X(
+                    "Percent:Q",
+                    title="% of total load",
+                    axis=alt.Axis(format=".0f"),
+                ),
+                tooltip=[
+                    alt.Tooltip("Food Composition Category:N", title="Food category"),
+                    alt.Tooltip("Pounds:Q", title="Pounds", format=",.1f"),
+                    alt.Tooltip("Percent:Q", title="% of total load", format=".1f"),
+                ],
+            )
+            .properties(height=max(300, 44 * len(category)))
+        )
+        st.altair_chart(category_chart, use_container_width=True)
+
+        display_category = (
+            category
+            .sort_values("Pounds", ascending=False)
+            .rename(columns={
+                "Food Composition Category": "Food Category",
+                "Percent": "% of Total Load",
+            })
+        )
         st.dataframe(
-            display_category.style.format({"Pounds": "{:,.1f}", "% of Total Load": "{:.1f}%"}),
+            display_category.style.format({
+                "Pounds": "{:,.1f}",
+                "% of Total Load": "{:.1f}%"
+            }),
             hide_index=True,
             width="stretch",
         )
@@ -1348,7 +1488,7 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
 with st.sidebar:
     st.header("Data")
     st.caption(f"Food database: **{DEFAULT_EXCEL_FILENAME}**")
-    st.caption("Classification data available")
+    
     if st.button("Reload data", width="stretch"):
         st.cache_data.clear()
         st.session_state.pop("backend_excel_bytes", None)
