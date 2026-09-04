@@ -1064,7 +1064,7 @@ def analyze_load(food_df: pd.DataFrame, incoming: pd.DataFrame, fbcenc_crosswalk
     return pd.DataFrame(records)
 
 
-def render_load_composition(food_df: pd.DataFrame) -> None:
+def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFrame | None = None) -> None:
     st.title("📦 Incoming Food Load Composition")
     st.caption("Analyze pounds by HER color and food category. FBCENC reviewed classifications are used first when available; common HER reference foods are resolved next, followed by USDA/HER matching.")
 
@@ -1357,11 +1357,21 @@ except PermissionError:
 except Exception as error:
     st.exception(error); st.stop()
 
+# Load the reviewed FBCENC catalog once. The app continues to work if the file
+# is absent, but when present it is the preferred classification source in
+# both single-food lookup and incoming-load analysis.
+fbcenc_crosswalk = None
+if DEFAULT_FBCENC_CLASSIFICATION_PATH.exists():
+    try:
+        fbcenc_crosswalk = load_fbcenc_crosswalk(DEFAULT_FBCENC_CLASSIFICATION_PATH)
+    except Exception as error:
+        st.sidebar.warning(f"FBCENC classification file could not be loaded: {error}")
+
 unique_food_count = food_df[[FOOD_CODE, FOOD_DESCRIPTION]].drop_duplicates().shape[0]
 
 app_mode = st.radio("Mode", ["Single food lookup", "Incoming load composition"], horizontal=True, key="app_mode")
 if app_mode == "Incoming load composition":
-    render_load_composition(food_df)
+    render_load_composition(food_df, fbcenc_crosswalk=fbcenc_crosswalk)
     st.stop()
 
 with st.sidebar:
@@ -1386,22 +1396,66 @@ with st.sidebar:
             )
 
 st.title("🥗 HER Food Classification")
-st.caption("Search by a food name, alternate name, or term in the source description. The dashboard uses one reference amount rather than asking users to choose a serving size.")
+st.caption("Search a food name or alternate name. Reviewed FBCENC classifications are used first when available.")
 
 search_text = st.text_input(
     "Search for a food",
-    placeholder="Try: leche fresca, whole milk, bacon, orange juice, chickpeas",
+    placeholder="Try: salmon, canned tuna, leche fresca, brown rice, bacon",
     key="food_search",
 )
-st.markdown('<div class="search-note">Alternative names inside “Includes:” are searchable. Example: <b>leche fresca</b> finds whole milk.</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="search-note">Common names and positive alternate names are searchable. '
+    'Exclusion wording such as “other than salmon or tuna” is not treated as a match.</div>',
+    unsafe_allow_html=True,
+)
 
 filter_col, code_col = st.columns([2.2, 1])
 with filter_col:
     browse_category = st.selectbox("Category", ["All categories"] + HER_CATEGORIES)
 with code_col:
-    code_search = st.text_input("Food code", placeholder="Optional")
+    code_search = st.text_input("Food code / item no.", placeholder="Optional")
 
 query = normalize_description_for_matching(search_text)
+
+# -----------------------------
+# FBCENC reviewed search results
+# -----------------------------
+fbc_options = pd.DataFrame()
+if fbcenc_crosswalk is not None and not fbcenc_crosswalk.empty:
+    fbc = fbcenc_crosswalk.copy()
+    if query:
+        # Match the actual description words. Do not use notes/source fields.
+        for term in query.split():
+            fbc = fbc[fbc["_description_norm"].str.contains(term, na=False, regex=False)]
+    if code_search.strip():
+        code_norm = clean_text(code_search).upper()
+        fbc = fbc[fbc["_item_norm"].str.contains(code_norm, na=False, regex=False)]
+    if browse_category != "All categories":
+        # FBCENC category naming is not always identical to the USDA/HER category list.
+        # Apply the filter only where it clearly matches.
+        exact_cat = fbc["Item Category"].astype(str).str.casefold().eq(browse_category.casefold())
+        if exact_cat.any():
+            fbc = fbc[exact_cat]
+        else:
+            fbc = fbc.iloc[0:0]
+
+    if not fbc.empty:
+        fbc_options = fbc[["Item No", "Description", "Item Category", "_her_display", "_description_norm"]].copy()
+        fbc_options["_lookup_source"] = "FBCENC"
+        fbc_options["_lookup_key"] = "FBCENC|" + fbc_options.index.astype(str)
+        fbc_options["_display_name"] = fbc_options["Description"]
+        fbc_options["_option_label"] = fbc_options["Description"]
+        # Item number disambiguates duplicate catalog descriptions without showing a source label.
+        duplicate_desc = fbc_options["_option_label"].duplicated(keep=False)
+        fbc_options.loc[duplicate_desc, "_option_label"] = (
+            fbc_options.loc[duplicate_desc, "Description"]
+            + " | Item "
+            + fbc_options.loc[duplicate_desc, "Item No"].astype(str)
+        )
+
+# -----------------------------
+# USDA/test workbook search results
+# -----------------------------
 filtered_df = food_df.copy()
 if browse_category != "All categories":
     filtered_df = filtered_df[filtered_df["_her_category"].eq(browse_category)]
@@ -1409,84 +1463,191 @@ if query:
     for term in query.split():
         filtered_df = filtered_df[filtered_df["_search_text"].str.contains(term, na=False, regex=False)]
 if code_search.strip():
-    filtered_df = filtered_df[filtered_df[FOOD_CODE].astype(str).str.contains(code_search.strip(), case=False, na=False, regex=False)]
+    filtered_df = filtered_df[
+        filtered_df[FOOD_CODE].astype(str).str.contains(
+            code_search.strip(), case=False, na=False, regex=False
+        )
+    ]
 
 active_filter = bool(query or code_search.strip() or browse_category != "All categories")
 if not active_filter:
     st.info("Start typing a food name or synonym above. You can also browse one HER category.")
     st.stop()
 
-food_options = (
+usda_options = (
     filtered_df[[FOOD_CODE, FOOD_DESCRIPTION, "_display_name", "_aliases", "_food_label", "_her_category", "_row_id"]]
     .drop_duplicates([FOOD_CODE, FOOD_DESCRIPTION])
     .sort_values(["_display_name", FOOD_CODE])
     .reset_index(drop=True)
 )
+if not usda_options.empty:
+    usda_options["_lookup_source"] = "USDA"
+    usda_options["_lookup_key"] = "USDA|" + usda_options["_row_id"].astype(str)
+    usda_options["_description_norm"] = usda_options["_display_name"].map(normalize_description_for_matching)
+    usda_options["_option_label"] = usda_options["_display_name"]
 
-if food_options.empty:
+# FBCENC reviewed records come first and suppress duplicate USDA names in the lookup list.
+if not fbc_options.empty and not usda_options.empty:
+    reviewed_names = set(fbc_options["_description_norm"])
+    usda_options = usda_options[~usda_options["_description_norm"].isin(reviewed_names)].copy()
+
+option_records = []
+if not fbc_options.empty:
+    option_records.extend(
+        {
+            "key": row["_lookup_key"],
+            "label": row["_option_label"],
+            "source": "FBCENC",
+            "index": int(idx),
+        }
+        for idx, row in fbc_options.iterrows()
+    )
+if not usda_options.empty:
+    option_records.extend(
+        {
+            "key": row["_lookup_key"],
+            "label": row["_option_label"],
+            "source": "USDA",
+            "index": int(idx),
+        }
+        for idx, row in usda_options.iterrows()
+    )
+
+if not option_records:
     st.warning("No foods matched your search.")
     st.stop()
 
-match_count = len(food_options)
-st.caption(f"{match_count:,} matching food{'s' if match_count != 1 else ''}.")
-if match_count > MAX_VISIBLE_RESULTS:
-    st.info(f"Showing the first {MAX_VISIBLE_RESULTS} matches. Add another word or choose a category to narrow the search.")
-    food_options = food_options.head(MAX_VISIBLE_RESULTS)
+options_df = pd.DataFrame(option_records)
+if len(options_df) > MAX_VISIBLE_RESULTS:
+    st.info(f"Showing the first {MAX_VISIBLE_RESULTS} matches. Add another word to narrow the search.")
+    options_df = options_df.head(MAX_VISIBLE_RESULTS)
 
-selected_label = st.selectbox("Choose a result", food_options["_food_label"].tolist(), key="food_result")
-selected_food = food_options[food_options["_food_label"].eq(selected_label)].iloc[0]
-selected_food_code = selected_food[FOOD_CODE]
-selected_food_description = selected_food[FOOD_DESCRIPTION]
-selected_row = food_df.loc[food_df["_row_id"].eq(selected_food["_row_id"])].iloc[0]
-selected_name = canonical_food_name(selected_food_description)
-selected_aliases = food_aliases(selected_food_description)
-selected_exclusions = food_exclusions(selected_food_description)
-
-forced_reason = forced_unranked_reason(selected_food_description)
-red_reason = forced_red_protein_reason(selected_food_description)
-fresh_produce = bool(selected_row.get("_fresh_produce", False))
-seafood_assumption = bool(selected_row.get("_seafood_assumption", False))
-suggested_category = suggest_her_category(selected_food_description)
-automatic_whole_grain_first = bool(selected_row.get("_whole_grain_detected", False))
-
-with st.expander("Review classification inputs", expanded=False):
-    st.caption("These controls are for manual review. Most users do not need to change them.")
-    her_category = st.selectbox(
-        "HER food category",
-        HER_CATEGORIES,
-        index=HER_CATEGORIES.index(suggested_category),
-        help="The category is suggested from the food description.",
-    )
-    review_col_1, review_col_2 = st.columns(2)
-    with review_col_1:
-        whole_grain_first = st.checkbox(
-            "Whole-grain wording appears in the food name",
-            value=automatic_whole_grain_first,
-            disabled=bool(forced_reason) or bool(red_reason) or fresh_produce or her_category not in {"Grains", "Processed and Packaged Snacks"},
-        )
-    with review_col_2:
-        juice_or_dried_fruit = st.checkbox(
-            "This is 100% juice or plain dried fruit",
-            value=False,
-            disabled=bool(forced_reason) or bool(red_reason) or fresh_produce or her_category != "Fruits and Vegetables",
-        )
-
-saturated_fat, saturated_column = numeric_from_columns(selected_row, ["Total Saturated", "Saturated Fat", "Saturated fat"])
-sodium, sodium_column = numeric_from_columns(selected_row, ["Sodium"])
-sugar, sugar_column = numeric_from_columns(selected_row, ["Added Sugars", "Added Sugar", "Total Added Sugars", "Total Sugars"])
-if seafood_assumption and pd.isna(sugar):
-    sugar, sugar_column = 0.5, "Assumed seafood sugar"
-
-classification = classify_food_description(
-    selected_food_description,
-    her_category,
-    saturated_fat,
-    sodium,
-    sugar,
-    whole_grain_first,
-    juice_or_dried_fruit,
-    fresh_produce,
+st.caption(f"{len(options_df):,} matching food{'s' if len(options_df) != 1 else ''}.")
+selected_key = st.selectbox(
+    "Choose a result",
+    options_df["key"].tolist(),
+    format_func=lambda k: options_df.loc[options_df["key"].eq(k), "label"].iloc[0],
+    key="food_result",
 )
+selected_option = options_df[options_df["key"].eq(selected_key)].iloc[0]
+
+lookup_from_fbcenc = selected_option["source"] == "FBCENC"
+reviewed_fbcenc_row = None
+selected_row = None
+selected_food_code = ""
+selected_food_description = ""
+selected_aliases = []
+selected_exclusions = []
+selected_name = ""
+selected_item_no = ""
+
+if lookup_from_fbcenc:
+    reviewed_fbcenc_row = fbc_options.loc[selected_option["index"]]
+    selected_item_no = clean_text(reviewed_fbcenc_row["Item No"])
+    selected_name = clean_text(reviewed_fbcenc_row["Description"])
+    selected_food_description = selected_name
+    her_category = clean_text(reviewed_fbcenc_row["Item Category"]) or "Miscellaneous Products"
+    reviewed_rank = clean_text(reviewed_fbcenc_row["_her_display"]) or "Needs Review"
+    classification = {
+        "Saturated Fat": "Not Ranked",
+        "Sodium": "Not Ranked",
+        "Sugar": "Not Ranked",
+        "Overall": reviewed_rank,
+        "Rule": "",
+    }
+    saturated_fat = sodium = sugar = np.nan
+    saturated_column = sodium_column = sugar_column = ""
+    forced_reason = red_reason = ""
+    fresh_produce = seafood_assumption = False
+    whole_grain_first = False
+    juice_or_dried_fruit = False
+
+    # If a unique USDA row can be found for the same reviewed food, use it only
+    # to populate nutrition details; the FBCENC reviewed HER rank remains authoritative.
+    nutrient_match, _ = match_one_food(food_df, selected_name)
+    if nutrient_match is not None:
+        selected_row = nutrient_match
+        selected_food_code = clean_text(selected_row.get(FOOD_CODE, ""))
+        selected_aliases = food_aliases(clean_text(selected_row.get(FOOD_DESCRIPTION, "")))
+        selected_exclusions = food_exclusions(clean_text(selected_row.get(FOOD_DESCRIPTION, "")))
+        saturated_fat, saturated_column = numeric_from_columns(selected_row, ["Total Saturated", "Saturated Fat", "Saturated fat"])
+        sodium, sodium_column = numeric_from_columns(selected_row, ["Sodium"])
+        sugar, sugar_column = numeric_from_columns(selected_row, ["Added Sugars", "Added Sugar", "Total Added Sugars", "Total Sugars"])
+else:
+    selected_food = usda_options.loc[selected_option["index"]]
+    selected_food_code = selected_food[FOOD_CODE]
+    selected_food_description = selected_food[FOOD_DESCRIPTION]
+    selected_row = food_df.loc[food_df["_row_id"].eq(selected_food["_row_id"])].iloc[0]
+    selected_name = canonical_food_name(selected_food_description)
+    selected_aliases = food_aliases(selected_food_description)
+    selected_exclusions = food_exclusions(selected_food_description)
+
+    # Before applying USDA-derived logic, check whether FBCENC has an exact reviewed
+    # classification for the selected food. When it does, use that reviewed result.
+    reviewed_fbcenc_row, _ = match_fbcenc_crosswalk(
+        fbcenc_crosswalk, "", selected_name
+    )
+
+    forced_reason = forced_unranked_reason(selected_food_description)
+    red_reason = forced_red_protein_reason(selected_food_description)
+    fresh_produce = bool(selected_row.get("_fresh_produce", False))
+    seafood_assumption = bool(selected_row.get("_seafood_assumption", False))
+    suggested_category = suggest_her_category(selected_food_description)
+    automatic_whole_grain_first = bool(selected_row.get("_whole_grain_detected", False))
+
+    if reviewed_fbcenc_row is not None:
+        her_category = clean_text(reviewed_fbcenc_row.get("Item Category", "")) or suggested_category
+        reviewed_rank = clean_text(reviewed_fbcenc_row.get("_her_display", "")) or "Needs Review"
+        whole_grain_first = automatic_whole_grain_first
+        juice_or_dried_fruit = False
+    else:
+        with st.expander("Review classification inputs", expanded=False):
+            st.caption("These controls are for manual review. Most users do not need to change them.")
+            her_category = st.selectbox(
+                "HER food category",
+                HER_CATEGORIES,
+                index=HER_CATEGORIES.index(suggested_category),
+                help="The category is suggested from the food description.",
+            )
+            review_col_1, review_col_2 = st.columns(2)
+            with review_col_1:
+                whole_grain_first = st.checkbox(
+                    "Whole-grain wording appears in the food name",
+                    value=automatic_whole_grain_first,
+                    disabled=bool(forced_reason) or bool(red_reason) or fresh_produce or her_category not in {"Grains", "Processed and Packaged Snacks"},
+                )
+            with review_col_2:
+                juice_or_dried_fruit = st.checkbox(
+                    "This is 100% juice or plain dried fruit",
+                    value=False,
+                    disabled=bool(forced_reason) or bool(red_reason) or fresh_produce or her_category != "Fruits and Vegetables",
+                )
+
+    saturated_fat, saturated_column = numeric_from_columns(selected_row, ["Total Saturated", "Saturated Fat", "Saturated fat"])
+    sodium, sodium_column = numeric_from_columns(selected_row, ["Sodium"])
+    sugar, sugar_column = numeric_from_columns(selected_row, ["Added Sugars", "Added Sugar", "Total Added Sugars", "Total Sugars"])
+    if seafood_assumption and pd.isna(sugar):
+        sugar, sugar_column = 0.5, "Assumed seafood sugar"
+
+    if reviewed_fbcenc_row is not None:
+        classification = {
+            "Saturated Fat": "Not Ranked",
+            "Sodium": "Not Ranked",
+            "Sugar": "Not Ranked",
+            "Overall": reviewed_rank,
+            "Rule": "",
+        }
+    else:
+        classification = classify_food_description(
+            selected_food_description,
+            her_category,
+            saturated_fat,
+            sodium,
+            sugar,
+            whole_grain_first,
+            juice_or_dried_fruit,
+            fresh_produce,
+        )
 
 st.markdown(f'<div class="food-title">{selected_name}</div>', unsafe_allow_html=True)
 header_parts = [her_category]
@@ -1497,7 +1658,7 @@ if selected_aliases:
     alias_html = "".join(f'<span class="alias-chip">{alias}</span>' for alias in selected_aliases[:8])
     st.markdown(alias_html, unsafe_allow_html=True)
 
-classification_tab, nutrition_tab, details_tab = st.tabs(["Classification", "Nutrition", "Details & source"])
+classification_tab, nutrition_tab = st.tabs(["Classification", "Nutrition"])
 
 with classification_tab:
     render_her_banner(classification["Overall"])
@@ -1509,10 +1670,20 @@ with classification_tab:
         with column:
             st.markdown(html, unsafe_allow_html=True)
 
-    nutrient_cols = st.columns(3)
-    render_status_card(nutrient_cols[0], "Saturated fat", saturated_fat, "g", classification["Saturated Fat"])
-    render_status_card(nutrient_cols[1], "Sodium", sodium, "mg", classification["Sodium"])
-    render_status_card(nutrient_cols[2], sugar_column or "Sugar", sugar, "g", classification["Sugar"])
+    if reviewed_fbcenc_row is not None and selected_row is None:
+        st.caption("This food uses its reviewed FBCENC HER classification. Nutrient-level values are not required for the lookup result.")
+    else:
+        nutrient_cols = st.columns(3)
+        # If the overall rank comes from FBCENC but a nutrition row is available,
+        # show the nutrient amounts without implying that they determined the reviewed rank.
+        if reviewed_fbcenc_row is not None:
+            render_status_card(nutrient_cols[0], "Saturated fat", saturated_fat, "g", "Not Ranked")
+            render_status_card(nutrient_cols[1], "Sodium", sodium, "mg", "Not Ranked")
+            render_status_card(nutrient_cols[2], sugar_column or "Sugar", sugar, "g", "Not Ranked")
+        else:
+            render_status_card(nutrient_cols[0], "Saturated fat", saturated_fat, "g", classification["Saturated Fat"])
+            render_status_card(nutrient_cols[1], "Sodium", sodium, "mg", classification["Sodium"])
+            render_status_card(nutrient_cols[2], sugar_column or "Sugar", sugar, "g", classification["Sugar"])
 
     messages = []
     if forced_reason:
@@ -1536,7 +1707,7 @@ with classification_tab:
 
     with st.expander("How was this classification determined?", expanded=False):
         st.write(f"**Category:** {her_category}")
-        st.write(f"**Reference amount:** {create_serving_label(selected_row)}")
+        st.write(f"**Reference amount:** {create_serving_label(selected_row) if selected_row is not None else 'Reviewed catalog classification'}")
         st.write(f"**Saturated-fat source:** {saturated_column or 'Not found'}")
         st.write(f"**Sodium source:** {sodium_column or 'Not found'}")
         st.write(f"**Sugar source:** {sugar_column or 'Not found'}")
@@ -1546,50 +1717,43 @@ with classification_tab:
         st.write(f"**Forced protein Choose Rarely:** {'Yes' if red_reason else 'No'}")
 
 with nutrition_tab:
-    st.subheader("Nutrition for the reference amount")
-    st.caption(create_serving_label(selected_row))
-    render_metric_cards(selected_row, nutrient_units, 1.0)
-
-    summary_df = nutrient_table(
-        selected_row,
-        [nutrient for nutrient in SUMMARY_NUTRIENTS if nutrient in food_df.columns],
-        nutrient_units,
-        1.0,
-    )
-    if summary_df.empty:
-        st.info("No nutrient values were found for this record.")
+    if selected_row is None:
+        st.info("No nutrient-detail row is attached to this reviewed FBCENC catalog entry.")
     else:
-        st.dataframe(summary_df, hide_index=True, width="stretch", height=520)
+        st.subheader("Nutrition for the reference amount")
+        st.caption(create_serving_label(selected_row))
+        render_metric_cards(selected_row, nutrient_units, 1.0)
 
-    with st.expander("Browse all nutrient fields", expanded=False):
-        nutrient_filter = st.text_input("Filter nutrient names", placeholder="sodium, vitamin, fatty acid", key="nutrient_filter")
-        all_df = nutrient_table(selected_row, all_nutrient_columns(food_df), nutrient_units, 1.0)
-        if nutrient_filter.strip():
-            all_df = all_df[all_df["Nutrient"].str.contains(nutrient_filter.strip(), case=False, na=False, regex=False)]
-        st.dataframe(all_df, hide_index=True, width="stretch", height=500)
+        summary_df = nutrient_table(
+            selected_row,
+            [nutrient for nutrient in SUMMARY_NUTRIENTS if nutrient in food_df.columns],
+            nutrient_units,
+            1.0,
+        )
+        if summary_df.empty:
+            st.info("No nutrient values were found for this record.")
+        else:
+            st.dataframe(summary_df, hide_index=True, width="stretch", height=520)
 
-with details_tab:
-    detail_left, detail_right = st.columns(2)
-    with detail_left:
-        st.markdown("#### Food record")
-        st.write(f"**Display name:** {selected_name}")
+        with st.expander("Browse all nutrient fields", expanded=False):
+            nutrient_filter = st.text_input("Filter nutrient names", placeholder="sodium, vitamin, fatty acid", key="nutrient_filter")
+            all_df = nutrient_table(selected_row, all_nutrient_columns(food_df), nutrient_units, 1.0)
+            if nutrient_filter.strip():
+                all_df = all_df[all_df["Nutrient"].str.contains(nutrient_filter.strip(), case=False, na=False, regex=False)]
+            st.dataframe(all_df, hide_index=True, width="stretch", height=500)
+
+with st.expander("Technical details", expanded=False):
+    if selected_item_no:
+        st.write(f"**Item no.:** {selected_item_no}")
+    if selected_food_code:
         st.write(f"**Food code:** {selected_food_code}")
-        st.write(f"**HER category:** {her_category}")
-        st.write(f"**Data source:** {selected_row.get('_data_source', 'Unknown')}")
-    with detail_right:
-        st.markdown("#### Reference amount")
-        st.write(f"**Measure:** {clean_text(selected_row.get(MEASURE_DESCRIPTION, ''))}")
-        st.write(f"**Number of servings:** {format_number(selected_row.get(NUMBER_SERVINGS, np.nan))}")
-        weight = selected_row.get(SERVING_WEIGHT, np.nan)
-        st.write(f"**Serving weight:** {'Unavailable' if pd.isna(weight) else format_number(weight) + ' g'}")
-
+    if selected_row is not None:
+        st.write(f"**Reference amount:** {create_serving_label(selected_row)}")
     if selected_aliases:
-        st.markdown("#### Searchable alternate names")
-        st.write("; ".join(selected_aliases))
-
-    with st.expander("Original source description", expanded=False):
-        st.write(selected_food_description)
-
-    with st.expander("HER guideline rule table", expanded=False):
-        rule_view = backend_rule_table()
-        st.dataframe(rule_view[rule_view["Food Category"].eq(her_category)], hide_index=True, width="stretch")
+        st.write("**Alternate names:** " + "; ".join(selected_aliases))
+    if selected_exclusions:
+        st.write("**Exclusion notes:** " + "; ".join(selected_exclusions))
+    if reviewed_fbcenc_row is not None:
+        st.write("**Reviewed catalog classification:** Yes")
+    elif selected_row is not None:
+        st.write(f"**Data record:** {clean_text(selected_row.get('_data_source', '')) or 'Food reference dataset'}")
