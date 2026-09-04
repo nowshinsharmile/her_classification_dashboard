@@ -222,7 +222,7 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"]{
 </style>
 ''', unsafe_allow_html=True)
 st.markdown("""<style>
-.block-container{max-width:1480px;padding-top:1.4rem;padding-bottom:3rem}
+.block-container{max-width:1500px;padding-top:1.4rem;padding-bottom:3rem}
 [data-testid="stSidebar"]{min-width:285px}
 .food-title{font-size:2rem;font-weight:750;line-height:1.15;margin:.1rem 0 .2rem}
 .food-subtitle{color:#6b7280;font-size:.95rem;margin-bottom:.8rem}
@@ -1405,45 +1405,31 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
     m2.metric("Classified", f"{classified_lb:,.1f} lb", help=f"{classified_pct:.1f}% of the incoming load has a HER result.")
     m3.metric("Needs review", f"{needs_review_lb:,.1f} lb", help=f"{review_pct:.1f}% of the incoming load could not be classified confidently.")
 
-    # Semantic cards in a responsive grid. This avoids Streamlit squeezing five
-    # independent columns until labels wrap awkwardly.
-    card_html = []
-    for _, r in comp.iterrows():
-        rank = str(r["HER Classification"])
-        icon = HER_ICONS.get(rank, "⚪")
-        bg = HER_COLORS.get(rank, HER_COLORS["Needs Review"])
-        fg = HER_TEXT_COLORS.get(rank, "#FFFFFF")
-        card_html.append(
-            f"""
-            <div style="
-                background:{bg};
-                color:{fg};
-                border-radius:18px;
-                padding:24px 24px 22px;
-                min-height:205px;
-                box-shadow:0 1px 3px rgba(0,0,0,.16);
-                display:flex;
-                flex-direction:column;
-                justify-content:space-between;
-                box-sizing:border-box;">
-                <div style="font-size:1.30rem;font-weight:750;line-height:1.22;">{icon} {rank}</div>
-                <div style="font-size:2.55rem;font-weight:800;line-height:1.05;margin-top:16px;white-space:nowrap;">{r['Pounds']:,.1f} lb</div>
-                <div style="font-size:1.18rem;font-weight:700;line-height:1.15;margin-top:14px;">{r['Percent']:.1f}% of load</div>
-            </div>
-            """
-        )
-    st.markdown(
-        """
-        <div style="
-            display:grid;
-            grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
-            gap:20px;
-            margin:12px 0 22px;">
-        """
-        + "".join(card_html)
-        + "</div>",
-        unsafe_allow_html=True,
-    )
+    # Semantic cards. Use Streamlit rows rather than one large multiline HTML
+    # block; this avoids Markdown treating indented HTML as a code block.
+    card_rows = [comp.iloc[i:i + 3] for i in range(0, len(comp), 3)]
+    for card_row in card_rows:
+        card_cols = st.columns(len(card_row), gap="large")
+        for col, (_, r) in zip(card_cols, card_row.iterrows()):
+            rank = str(r["HER Classification"])
+            icon = HER_ICONS.get(rank, "⚪")
+            bg = HER_COLORS.get(rank, HER_COLORS["Needs Review"])
+            fg = HER_TEXT_COLORS.get(rank, "#FFFFFF")
+            card = (
+                f'<div style="background:{bg};color:{fg};border-radius:18px;'
+                f'padding:26px 26px 24px;min-height:215px;'
+                f'box-shadow:0 1px 3px rgba(0,0,0,.16);box-sizing:border-box;">'
+                f'<div style="font-size:1.35rem;font-weight:750;line-height:1.2;'
+                f'margin-bottom:24px;">{icon} {rank}</div>'
+                f'<div style="font-size:2.75rem;font-weight:800;line-height:1.05;'
+                f'white-space:nowrap;">{r["Pounds"]:,.1f} lb</div>'
+                f'<div style="font-size:1.22rem;font-weight:700;line-height:1.15;'
+                f'margin-top:20px;">{r["Percent"]:.1f}% of load</div>'
+                f'</div>'
+            )
+            with col:
+                st.markdown(card, unsafe_allow_html=True)
+        st.write("")
 
     # Interactive semantic-color chart. Clicking a bar returns the selected HER class.
     color_domain = ["Choose Often", "Choose Sometimes", "Choose Rarely", "Assorted", "Unranked", "Not Ranked", "Non Food", "Needs Review"]
