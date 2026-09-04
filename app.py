@@ -222,7 +222,7 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"]{
 </style>
 ''', unsafe_allow_html=True)
 st.markdown("""<style>
-.block-container{max-width:1180px;padding-top:1.4rem;padding-bottom:3rem}
+.block-container{max-width:1480px;padding-top:1.4rem;padding-bottom:3rem}
 [data-testid="stSidebar"]{min-width:285px}
 .food-title{font-size:2rem;font-weight:750;line-height:1.15;margin:.1rem 0 .2rem}
 .food-subtitle{color:#6b7280;font-size:.95rem;margin-bottom:.8rem}
@@ -1156,6 +1156,141 @@ def analyze_load(food_df: pd.DataFrame, incoming: pd.DataFrame, fbcenc_crosswalk
     return pd.DataFrame(records)
 
 
+
+def normalize_upload_header(value: object) -> str:
+    """Normalize an uploaded column heading for flexible matching."""
+    text = clean_text(value).lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def detect_load_columns(raw: pd.DataFrame) -> dict[str, str]:
+    """Detect item number, food-description and weight columns from common exports.
+
+    Food examples:
+      Description, Food Description, Item Description, Product, Product Name,
+      Food, Item, Item Name, Material Description.
+
+    Weight examples:
+      Pounds, Lbs, Weight, Weight lbs, Ext Gross Weight, Extended Gross Weight,
+      Gross Weight, Net Weight, Total Weight.
+    """
+    normalized = {column: normalize_upload_header(column) for column in raw.columns}
+    rename: dict[str, str] = {}
+
+    item_exact = {
+        "item no", "item number", "item num", "item id", "item code",
+        "sku", "product code", "product id", "material no", "material number",
+    }
+    food_exact = {
+        "food", "food name", "food description", "description",
+        "item", "item name", "item description",
+        "product", "product name", "product description",
+        "material", "material description", "commodity", "commodity description",
+    }
+    weight_exact = {
+        "pounds", "pound", "lbs", "lb", "weight", "weight lb", "weight lbs",
+        "gross weight", "net weight", "total weight",
+        "ext gross weight", "extended gross weight",
+        "ext weight", "extended weight", "quantity pounds", "qty pounds",
+    }
+
+    used = set()
+
+    # Exact/common aliases first.
+    for column, norm in normalized.items():
+        if norm in item_exact and "Item No" not in rename.values():
+            rename[column] = "Item No"; used.add(column)
+    for column, norm in normalized.items():
+        if column in used:
+            continue
+        if norm in food_exact and "Food" not in rename.values():
+            rename[column] = "Food"; used.add(column)
+    for column, norm in normalized.items():
+        if column in used:
+            continue
+        if norm in weight_exact and "Pounds" not in rename.values():
+            rename[column] = "Pounds"; used.add(column)
+
+    # Flexible fallback for real warehouse exports.
+    if "Food" not in rename.values():
+        food_candidates = []
+        for column, norm in normalized.items():
+            if column in used:
+                continue
+            score = 0
+            if "description" in norm: score += 6
+            if "food" in norm: score += 5
+            if "product" in norm: score += 4
+            if "item" in norm: score += 3
+            if "material" in norm: score += 3
+            if "commodity" in norm: score += 3
+            if "name" in norm: score += 2
+            if any(x in norm for x in ["weight", "pound", "lbs", "quantity", "qty", "code", "number", " no "]):
+                score -= 5
+            if score > 0:
+                food_candidates.append((score, column))
+        if food_candidates:
+            _, column = max(food_candidates, key=lambda x: x[0])
+            rename[column] = "Food"; used.add(column)
+
+    if "Pounds" not in rename.values():
+        weight_candidates = []
+        for column, norm in normalized.items():
+            if column in used:
+                continue
+            score = 0
+            if "ext gross weight" in norm or "extended gross weight" in norm: score += 12
+            if "gross weight" in norm: score += 10
+            if "net weight" in norm: score += 9
+            if "pound" in norm or re.search(r"\blbs?\b", norm): score += 8
+            if "weight" in norm: score += 6
+            if "quantity" in norm or re.search(r"\bqty\b", norm): score += 2
+            if any(x in norm for x in ["description", "name", "code", "number"]):
+                score -= 5
+            if score > 0:
+                weight_candidates.append((score, column))
+        if weight_candidates:
+            _, column = max(weight_candidates, key=lambda x: x[0])
+            rename[column] = "Pounds"; used.add(column)
+
+    return rename
+
+
+def prepare_uploaded_load(raw: pd.DataFrame) -> tuple[pd.DataFrame | None, str]:
+    """Standardize an uploaded load file to Item No / Food / Pounds."""
+    raw = raw.copy()
+    rename = detect_load_columns(raw)
+    standardized = raw.rename(columns=rename)
+
+    if "Food" not in standardized.columns or "Pounds" not in standardized.columns:
+        detected = ", ".join(f"{src} → {dst}" for src, dst in rename.items()) or "none"
+        return None, (
+            "Could not identify both a food-description column and a weight column. "
+            f"Detected mappings: {detected}."
+        )
+
+    if "Item No" not in standardized.columns:
+        standardized["Item No"] = ""
+
+    standardized["Food"] = standardized["Food"].map(clean_text)
+    standardized["Pounds"] = pd.to_numeric(standardized["Pounds"], errors="coerce")
+    standardized["Item No"] = standardized["Item No"].map(clean_text)
+
+    # Keep only usable rows; do not require a specific original column name.
+    standardized = standardized[
+        standardized["Food"].ne("") &
+        standardized["Pounds"].notna() &
+        standardized["Pounds"].gt(0)
+    ][["Item No", "Food", "Pounds"]].copy()
+
+    if standardized.empty:
+        return None, "The detected columns did not contain any usable food rows with positive numeric weight."
+
+    mapping_text = ", ".join(f"{src} → {dst}" for src, dst in rename.items())
+    return standardized, mapping_text
+
+
 def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFrame | None = None) -> None:
     st.title("📦 Incoming Food Load Composition")
     st.caption("Analyze an incoming food load by HER color and food category.")
@@ -1226,28 +1361,19 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
 
     with upload_tab:
         uploaded = st.file_uploader("Upload a file", type=["csv", "xlsx", "xls"], key="load_upload")
-        st.caption("Required: Food/Description and Pounds. Item No is optional when available.")
+        st.caption("Upload your normal export. The app will detect common food-description and weight column names automatically.")
         if uploaded is not None:
             try:
                 raw = pd.read_csv(uploaded) if uploaded.name.lower().endswith(".csv") else pd.read_excel(uploaded)
-                rename = {}
-                for c in raw.columns:
-                    lc = clean_text(c).lower()
-                    if lc in {"item no", "item number", "item_no", "item #", "item#", "sku", "product code"}:
-                        rename[c] = "Item No"
-                    elif lc in {"food", "food name", "food description", "description", "item", "product description"}:
-                        rename[c] = "Food"
-                    elif lc in {"pounds", "pound", "lbs", "lb", "weight", "weight lb", "weight lbs", "ext gross weight", "ext_gross_weight"}:
-                        rename[c] = "Pounds"
-                raw = raw.rename(columns=rename)
-                if {"Food", "Pounds"}.issubset(raw.columns):
-                    if "Item No" not in raw.columns:
-                        raw["Item No"] = ""
-                    st.dataframe(raw[["Item No", "Food", "Pounds"]].head(50), hide_index=True, width="stretch")
+                prepared, mapping_info = prepare_uploaded_load(raw)
+                if prepared is not None:
+                    st.caption(f"Detected columns: {mapping_info}")
+                    st.dataframe(prepared.head(50), hide_index=True, width="stretch")
                     if st.button("Analyze uploaded load", type="primary", width="stretch", key="analyze_uploaded"):
-                        incoming = raw[["Item No", "Food", "Pounds"]].copy()
+                        incoming = prepared.copy()
                 else:
-                    st.error("Could not identify both Food and Pounds columns.")
+                    st.error(mapping_info)
+                    st.caption("Examples accepted automatically: Description, Item Description, Product Name, Food; and Pounds, Lbs, Weight, Ext Gross Weight, Gross Weight, Net Weight.")
             except Exception as exc:
                 st.error(f"Could not read the uploaded file: {exc}")
 
@@ -1279,26 +1405,45 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
     m2.metric("Classified", f"{classified_lb:,.1f} lb", help=f"{classified_pct:.1f}% of the incoming load has a HER result.")
     m3.metric("Needs review", f"{needs_review_lb:,.1f} lb", help=f"{review_pct:.1f}% of the incoming load could not be classified confidently.")
 
-    # Semantic cards. Avoid st.metric delta because Streamlit renders every positive
-    # percentage in green, which is misleading for yellow/red/review classes.
-    cols = st.columns(min(len(comp), 6))
-    for col, (_, r) in zip(cols, comp.iterrows()):
+    # Semantic cards in a responsive grid. This avoids Streamlit squeezing five
+    # independent columns until labels wrap awkwardly.
+    card_html = []
+    for _, r in comp.iterrows():
         rank = str(r["HER Classification"])
         icon = HER_ICONS.get(rank, "⚪")
         bg = HER_COLORS.get(rank, HER_COLORS["Needs Review"])
         fg = HER_TEXT_COLORS.get(rank, "#FFFFFF")
-        with col:
-            st.markdown(
-                f"""
-                <div style="background:{bg};color:{fg};border-radius:14px;padding:18px 18px 16px;min-height:142px;
-                            box-shadow:0 1px 2px rgba(0,0,0,.12);margin-bottom:8px">
-                    <div style="font-size:1rem;font-weight:650;margin-bottom:12px">{icon} {rank}</div>
-                    <div style="font-size:2rem;font-weight:750;line-height:1.05">{r['Pounds']:,.1f} lb</div>
-                    <div style="font-size:1.25rem;font-weight:650;margin-top:12px">{r['Percent']:.1f}% of load</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+        card_html.append(
+            f"""
+            <div style="
+                background:{bg};
+                color:{fg};
+                border-radius:18px;
+                padding:24px 24px 22px;
+                min-height:205px;
+                box-shadow:0 1px 3px rgba(0,0,0,.16);
+                display:flex;
+                flex-direction:column;
+                justify-content:space-between;
+                box-sizing:border-box;">
+                <div style="font-size:1.30rem;font-weight:750;line-height:1.22;">{icon} {rank}</div>
+                <div style="font-size:2.55rem;font-weight:800;line-height:1.05;margin-top:16px;white-space:nowrap;">{r['Pounds']:,.1f} lb</div>
+                <div style="font-size:1.18rem;font-weight:700;line-height:1.15;margin-top:14px;">{r['Percent']:.1f}% of load</div>
+            </div>
+            """
+        )
+    st.markdown(
+        """
+        <div style="
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+            gap:20px;
+            margin:12px 0 22px;">
+        """
+        + "".join(card_html)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
 
     # Interactive semantic-color chart. Clicking a bar returns the selected HER class.
     color_domain = ["Choose Often", "Choose Sometimes", "Choose Rarely", "Assorted", "Unranked", "Not Ranked", "Non Food", "Needs Review"]
@@ -1516,7 +1661,7 @@ if DEFAULT_FBCENC_CLASSIFICATION_PATH.exists():
 
 unique_food_count = food_df[[FOOD_CODE, FOOD_DESCRIPTION]].drop_duplicates().shape[0]
 
-app_mode = st.radio("Mode", ["Single food lookup", "Incoming load composition"], horizontal=True, key="app_mode")
+app_mode = st.radio("Mode", ["Incoming load composition", "Single food lookup"], horizontal=True, key="app_mode")
 if app_mode == "Incoming load composition":
     render_load_composition(food_df, fbcenc_crosswalk=fbcenc_crosswalk)
     st.stop()
