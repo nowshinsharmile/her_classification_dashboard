@@ -874,7 +874,7 @@ def match_one_food(food_df: pd.DataFrame, query: str) -> tuple[pd.Series | None,
 
 
 # ============================================================
-# FBCENC CLASSIFICATION CROSSWALK
+# classification data CROSSWALK
 # ============================================================
 
 FBCENC_REQUIRED_COLUMNS = ["Item No", "Description", "Item Category", "HER Category New"]
@@ -901,13 +901,13 @@ def load_fbcenc_crosswalk(source) -> pd.DataFrame:
 
     The file is used as the first matching layer for incoming FBCENC loads.
     It does not require nutrient reclassification when an item number or exact
-    FBCENC description already has a reviewed HER category.
+    description already has a reviewed HER category.
     """
     frame = pd.read_excel(source)
     frame.columns = [clean_text(c) for c in frame.columns]
     missing = [c for c in FBCENC_REQUIRED_COLUMNS if c not in frame.columns]
     if missing:
-        raise ValueError("FBCENC classification file is missing: " + ", ".join(missing))
+        raise ValueError("classification data file is missing: " + ", ".join(missing))
 
     frame = frame[FBCENC_REQUIRED_COLUMNS].copy()
     frame["Item No"] = frame["Item No"].map(clean_text)
@@ -923,38 +923,38 @@ def load_fbcenc_crosswalk(source) -> pd.DataFrame:
 
 def match_fbcenc_crosswalk(crosswalk: pd.DataFrame | None, item_no: str, food: str) -> tuple[pd.Series | None, str]:
     if crosswalk is None or crosswalk.empty:
-        return None, "No FBCENC crosswalk loaded"
+        return None, "No classification data loaded"
 
     item_key = clean_text(item_no).upper()
     if item_key:
         hits = crosswalk[crosswalk["_item_norm"].eq(item_key)]
         if len(hits) == 1:
-            return hits.iloc[0], "Exact FBCENC item-number match"
+            return hits.iloc[0], "Exact item-number match"
         if len(hits) > 1:
             # Item numbers can repeat across historical descriptions. If every reviewed
             # row agrees, use the reviewed result without pretending one row was unique.
             outcomes = hits[["Item Category", "_her_display"]].drop_duplicates()
             if len(outcomes) == 1:
-                return hits.iloc[0], f"FBCENC item number matched {len(hits)} agreeing catalog rows"
+                return hits.iloc[0], f"item number matched {len(hits)} agreeing catalog rows"
 
     food_key = normalize_description_for_matching(food)
     if food_key:
         hits = crosswalk[crosswalk["_description_norm"].eq(food_key)]
         if len(hits) == 1:
-            return hits.iloc[0], "Exact FBCENC description match"
+            return hits.iloc[0], "Exact description match"
         if len(hits) > 1:
             outcomes = hits[["Item Category", "_her_display"]].drop_duplicates()
             if len(outcomes) == 1:
-                return hits.iloc[0], f"FBCENC description matched {len(hits)} agreeing catalog rows"
+                return hits.iloc[0], f"description matched {len(hits)} agreeing catalog rows"
 
-    return None, "No exact FBCENC catalog match"
+    return None, "No exact classification data match"
 
 
 def analyze_load(food_df: pd.DataFrame, incoming: pd.DataFrame, fbcenc_crosswalk: pd.DataFrame | None = None) -> pd.DataFrame:
     """Classify an incoming food list with a rule-aware, conservative hierarchy.
 
     Hierarchy:
-      0) reviewed FBCENC crosswalk by Item No or exact description;
+      0) available crosswalk by Item No or exact description;
       1) common broad HER reference names (e.g., salmon, canned tuna, brown rice);
       2) exact/unique USDA row -> use its nutrients and HER logic;
       3) decisive HER name-level rule (e.g., bacon, ice cream, fresh produce);
@@ -979,8 +979,8 @@ def analyze_load(food_df: pd.DataFrame, incoming: pd.DataFrame, fbcenc_crosswalk
                 "Matched Food": clean_text(local_match.get("Description", "")),
                 "HER Category": clean_text(local_match.get("Item Category", "")) or "Needs Review",
                 "HER Classification": clean_text(local_match.get("_her_display", "")) or "Needs Review",
-                "Match Status": "FBCENC reviewed",
-                "Match Note": local_method + "; uses HER Category New from the FBCENC classification workbook.",
+                "Match Status": "Data available",
+                "Match Note": local_method + "; uses HER Category New from the classification data workbook.",
             })
             continue
 
@@ -1066,9 +1066,9 @@ def analyze_load(food_df: pd.DataFrame, incoming: pd.DataFrame, fbcenc_crosswalk
 
 def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFrame | None = None) -> None:
     st.title("📦 Incoming Food Load Composition")
-    st.caption("Analyze pounds by HER color and food category. FBCENC reviewed classifications are used first when available; common HER reference foods are resolved next, followed by USDA/HER matching.")
+    st.caption("Analyze an incoming food load by HER color and food category.")
 
-    # The reviewed FBCENC crosswalk is stored beside this script and loads automatically.
+    # The available crosswalk is stored beside this script and loads automatically.
     fbcenc_crosswalk = None
     try:
         if DEFAULT_FBCENC_CLASSIFICATION_PATH.exists():
@@ -1076,12 +1076,12 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
         else:
             st.warning(
                 f"{DEFAULT_FBCENC_CLASSIFICATION_FILENAME} was not found beside the app. "
-                "FBCENC-specific matching is unavailable until that file is added to the folder."
+                "Some pre-reviewed classification matches will be unavailable until that file is added to the folder."
             )
     except Exception as exc:
-        st.error(f"Could not load the FBCENC classification workbook: {exc}")
+        st.error(f"Could not load the classification data workbook: {exc}")
 
-    entry_tab, upload_tab, catalog_tab = st.tabs(["Enter / paste a load", "Upload load CSV or Excel", "FBCENC catalog preview"])
+    entry_tab, upload_tab = st.tabs(["Enter / paste a load", "Upload load CSV or Excel"])
     incoming = None
 
     with entry_tab:
@@ -1122,8 +1122,8 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
             hide_index=True,
             width="stretch",
             column_config={
-                "Item No": st.column_config.TextColumn("Item No", help="Optional FBCENC item number; preferred when available"),
-                "Food": st.column_config.TextColumn("Food", help="FBCENC description, USDA food name, or searchable synonym"),
+                "Item No": st.column_config.TextColumn("Item No", help="Optional item number; preferred when available"),
+                "Food": st.column_config.TextColumn("Food", help="description, USDA food name, or searchable synonym"),
                 "Pounds": st.column_config.NumberColumn("Pounds", min_value=0.0, step=1.0, format="%.1f"),
             },
             key="load_editor",
@@ -1133,7 +1133,7 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
 
     with upload_tab:
         uploaded = st.file_uploader("Upload a file", type=["csv", "xlsx", "xls"], key="load_upload")
-        st.caption("Required: Food/Description and Pounds. Item No is optional but strongly preferred for FBCENC data.")
+        st.caption("Required: Food/Description and Pounds. Item No is optional when available.")
         if uploaded is not None:
             try:
                 raw = pd.read_csv(uploaded) if uploaded.name.lower().endswith(".csv") else pd.read_excel(uploaded)
@@ -1158,20 +1158,6 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
             except Exception as exc:
                 st.error(f"Could not read the uploaded file: {exc}")
 
-    with catalog_tab:
-        if fbcenc_crosswalk is None or fbcenc_crosswalk.empty:
-            st.info("Load the FBCENC classification workbook above to preview the reviewed catalog.")
-        else:
-            catalog_view = fbcenc_crosswalk[["Item No", "Description", "Item Category", "HER Category New"]].copy()
-            search_catalog = st.text_input("Search FBCENC catalog", placeholder="milk, granola, item number...", key="catalog_search")
-            if search_catalog.strip():
-                q = normalize_description_for_matching(search_catalog)
-                item_q = clean_text(search_catalog).upper()
-                mask = catalog_view["Item No"].astype(str).str.upper().str.contains(item_q, na=False, regex=False) | catalog_view["Description"].map(normalize_description_for_matching).str.contains(q, na=False, regex=False)
-                catalog_view = catalog_view[mask]
-            st.caption(f"{len(catalog_view):,} catalog rows shown.")
-            st.dataframe(catalog_view.head(500), hide_index=True, width="stretch", height=420)
-
     if incoming is not None:
         if "Item No" not in incoming.columns:
             incoming["Item No"] = ""
@@ -1182,7 +1168,7 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
         return
 
     total_lb = float(analysis["Pounds"].sum())
-    reviewed_lb = float(analysis.loc[analysis["Match Status"].eq("FBCENC reviewed"), "Pounds"].sum())
+    reviewed_lb = float(analysis.loc[analysis["Match Status"].eq("Data available"), "Pounds"].sum())
     comp = analysis.groupby("HER Classification", dropna=False)["Pounds"].sum().reset_index()
     comp["Percent"] = np.where(total_lb > 0, comp["Pounds"] / total_lb * 100, 0.0)
     order = {"Choose Often": 0, "Choose Sometimes": 1, "Choose Rarely": 2, "Assorted": 3, "Unranked": 4, "Not Ranked": 5, "Non Food": 6, "Needs Review": 7}
@@ -1192,7 +1178,7 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
     st.markdown("### Color composition")
     m1, m2 = st.columns(2)
     m1.metric("Total incoming load", f"{total_lb:,.1f} lb")
-    m2.metric("Matched to reviewed FBCENC catalog", f"{reviewed_lb:,.1f} lb", help="Pounds classified directly from HER Category New in the FBCENC workbook")
+    m2.metric("Data available", f"{reviewed_lb:,.1f} lb", help="Pounds classified directly from available reviewed classification data")
 
     # Semantic cards. Avoid st.metric delta because Streamlit renders every positive
     # percentage in green, which is misleading for yellow/red/review classes.
@@ -1331,8 +1317,29 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
             width="stretch",
         )
 
-    st.markdown("### Item-level results")
-    st.dataframe(analysis, hide_index=True, width="stretch")
+    # Keep row-level diagnostics out of the main dashboard.
+    # Users can open them only when they actually need to inspect individual matches.
+    with st.expander("Show item-level details", expanded=False):
+        display_cols = [
+            "Input Food",
+            "Pounds",
+            "Matched Food",
+            "HER Category",
+            "HER Classification",
+        ]
+        available_cols = [c for c in display_cols if c in analysis.columns]
+        st.dataframe(analysis[available_cols], hide_index=True, width="stretch")
+
+        with st.expander("Show matching diagnostics", expanded=False):
+            diagnostic_cols = [
+                "Item No",
+                "Input Food",
+                "Matched Food",
+                "Match Status",
+                "Match Note",
+            ]
+            diagnostic_cols = [c for c in diagnostic_cols if c in analysis.columns]
+            st.dataframe(analysis[diagnostic_cols], hide_index=True, width="stretch")
 
 # ============================================================
 # CLEAN SEARCH-FIRST DASHBOARD
@@ -1341,7 +1348,7 @@ def render_load_composition(food_df: pd.DataFrame, fbcenc_crosswalk: pd.DataFram
 with st.sidebar:
     st.header("Data")
     st.caption(f"Food database: **{DEFAULT_EXCEL_FILENAME}**")
-    st.caption(f"FBCENC classifications: **{DEFAULT_FBCENC_CLASSIFICATION_FILENAME}**")
+    st.caption("Classification data available")
     if st.button("Reload data", width="stretch"):
         st.cache_data.clear()
         st.session_state.pop("backend_excel_bytes", None)
@@ -1357,7 +1364,7 @@ except PermissionError:
 except Exception as error:
     st.exception(error); st.stop()
 
-# Load the reviewed FBCENC catalog once. The app continues to work if the file
+# Load the available catalog once. The app continues to work if the file
 # is absent, but when present it is the preferred classification source in
 # both single-food lookup and incoming-load analysis.
 fbcenc_crosswalk = None
@@ -1365,7 +1372,7 @@ if DEFAULT_FBCENC_CLASSIFICATION_PATH.exists():
     try:
         fbcenc_crosswalk = load_fbcenc_crosswalk(DEFAULT_FBCENC_CLASSIFICATION_PATH)
     except Exception as error:
-        st.sidebar.warning(f"FBCENC classification file could not be loaded: {error}")
+        st.sidebar.warning(f"Some classification data could not be loaded: {error}")
 
 unique_food_count = food_df[[FOOD_CODE, FOOD_DESCRIPTION]].drop_duplicates().shape[0]
 
@@ -1396,7 +1403,7 @@ with st.sidebar:
             )
 
 st.title("🥗 HER Food Classification")
-st.caption("Search a food name or alternate name. Reviewed FBCENC classifications are used first when available.")
+st.caption("Search a food name or alternate name. Available classification data are used automatically.")
 
 search_text = st.text_input(
     "Search for a food",
@@ -1418,7 +1425,7 @@ with code_col:
 query = normalize_description_for_matching(search_text)
 
 # -----------------------------
-# FBCENC reviewed search results
+# Data available search results
 # -----------------------------
 fbc_options = pd.DataFrame()
 if fbcenc_crosswalk is not None and not fbcenc_crosswalk.empty:
@@ -1486,7 +1493,7 @@ if not usda_options.empty:
     usda_options["_description_norm"] = usda_options["_display_name"].map(normalize_description_for_matching)
     usda_options["_option_label"] = usda_options["_display_name"]
 
-# FBCENC reviewed records come first and suppress duplicate USDA names in the lookup list.
+# Data available records come first and suppress duplicate USDA names in the lookup list.
 if not fbc_options.empty and not usda_options.empty:
     reviewed_names = set(fbc_options["_description_norm"])
     usda_options = usda_options[~usda_options["_description_norm"].isin(reviewed_names)].copy()
@@ -1563,7 +1570,7 @@ if lookup_from_fbcenc:
     juice_or_dried_fruit = False
 
     # If a unique USDA row can be found for the same reviewed food, use it only
-    # to populate nutrition details; the FBCENC reviewed HER rank remains authoritative.
+    # to populate nutrition details; the Data available HER rank remains authoritative.
     nutrient_match, _ = match_one_food(food_df, selected_name)
     if nutrient_match is not None:
         selected_row = nutrient_match
@@ -1671,7 +1678,7 @@ with classification_tab:
             st.markdown(html, unsafe_allow_html=True)
 
     if reviewed_fbcenc_row is not None and selected_row is None:
-        st.caption("This food uses its reviewed FBCENC HER classification. Nutrient-level values are not required for the lookup result.")
+        st.caption("This food uses its available HER classification. Nutrient-level values are not required for the lookup result.")
     else:
         nutrient_cols = st.columns(3)
         # If the overall rank comes from FBCENC but a nutrition row is available,
@@ -1718,7 +1725,7 @@ with classification_tab:
 
 with nutrition_tab:
     if selected_row is None:
-        st.info("No nutrient-detail row is attached to this reviewed FBCENC catalog entry.")
+        st.info("No nutrient-detail row is attached to this available catalog entry.")
     else:
         st.subheader("Nutrition for the reference amount")
         st.caption(create_serving_label(selected_row))
@@ -1754,6 +1761,6 @@ with st.expander("Technical details", expanded=False):
     if selected_exclusions:
         st.write("**Exclusion notes:** " + "; ".join(selected_exclusions))
     if reviewed_fbcenc_row is not None:
-        st.write("**Reviewed catalog classification:** Yes")
+        st.write("**Classification data available:** Yes")
     elif selected_row is not None:
         st.write(f"**Data record:** {clean_text(selected_row.get('_data_source', '')) or 'Food reference dataset'}")
