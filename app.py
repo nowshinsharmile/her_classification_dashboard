@@ -20,9 +20,9 @@ import altair as alt
 warnings.filterwarnings("ignore", message=r"Print area cannot be set to Defined name.*", category=UserWarning, module=r"openpyxl\.reader\.workbook")
 
 BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_EXCEL_FILENAME = "What's In The Foods You Eat Search Tool 2021-2023.xlsx"
+DEFAULT_EXCEL_FILENAME = "test.xlsx"
 DEFAULT_EXCEL_PATH = BASE_DIR / DEFAULT_EXCEL_FILENAME
-DEFAULT_SHEET_NAME = "Search Tool"
+DEFAULT_SHEET_NAME = "Sheet1"
 DEFAULT_FBCENC_CLASSIFICATION_FILENAME = "FBCENC_HER_Classifications.xlsx"
 DEFAULT_FBCENC_CLASSIFICATION_PATH = BASE_DIR / DEFAULT_FBCENC_CLASSIFICATION_FILENAME
 REFERENCE_MEASURE = "Quantity not specified"
